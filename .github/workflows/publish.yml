@@ -1,0 +1,72 @@
+name: publish
+
+# Publishes @practicalworks/guardrails to public npm, and the same version to
+# GitHub Packages, whenever main carries a version a registry does not have yet.
+#
+# npm: NO credential here. npm trusted publishing checks this workflow's OIDC
+# token against the trusted publisher configured on the package and issues a
+# short-lived credential. `npm publish`, not `pnpm publish` (pnpm's OIDC support
+# is incomplete); no NODE_AUTH_TOKEN in that step's environment, even empty, or
+# npm uses it instead of falling back to OIDC. Provenance needs a PUBLIC source
+# repo, which is why the package lives here and not in a private monorepo.
+#
+# GitHub Packages: a consumer whose .npmrc maps the whole @practicalworks scope
+# there resolves this package there too. Without this copy its install 404s.
+on:
+  push:
+    branches: [main]
+    paths: ["package.json", "bin/**", "hooks/**", "agent-hooks/**", ".github/workflows/publish.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+  packages: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: PracticalWorks/.github/.github/actions/setup@v1
+        with:
+          pnpm-version: "10.14.0"
+          node-version: "22"
+      - run: npm install -g npm@latest && npm --version
+      - run: pnpm guard
+      - run: pnpm test
+      - name: Pack
+        run: npm pack --pack-destination "$RUNNER_TEMP/pack"
+      - name: Publish to npm if this version is new
+        run: |
+          name=$(node -p "require('./package.json').name")
+          version=$(node -p "require('./package.json').version")
+          if npm view "$name@$version" version --registry https://registry.npmjs.org/ >/dev/null 2>&1; then
+            echo "SKIP: $name@$version is already on npm"
+            exit 0
+          fi
+          npm publish "$RUNNER_TEMP"/pack/*.tgz --access public --provenance --registry https://registry.npmjs.org/
+      # GitHub Packages, with this job's own GITHUB_TOKEN, set on THIS step only
+      # (see the npm note above). The userconfig names the variable, never its value.
+      - name: Publish to GitHub Packages if this version is new there
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          cfg="$RUNNER_TEMP/github-packages.npmrc"
+          echo '@practicalworks:registry=https://npm.pkg.github.com' > "$cfg"
+          echo '//npm.pkg.github.com/:_authToken=${NODE_AUTH_TOKEN}' >> "$cfg"
+          name=$(node -p "require('./package.json').name")
+          version=$(node -p "require('./package.json').version")
+          if npm view "$name@$version" version --userconfig "$cfg" >/dev/null 2>&1; then
+            echo "SKIP: $name@$version is already on GitHub Packages"
+            exit 0
+          fi
+          npm publish "$RUNNER_TEMP"/pack/*.tgz --userconfig "$cfg" --registry https://npm.pkg.github.com
+      # Last, so a slow or failed check never skips the GitHub Packages copy above.
+      # It waits up to 15 minutes for npm to serve a fresh version's attestation, and
+      # passes only provenance built by THIS repo's publish.yml on refs/heads/main.
+      - name: Verify npm provenance
+        run: |
+          name=$(node -p "require('./package.json').name")
+          version=$(node -p "require('./package.json').version")
+          node scripts/verify-npm-provenance.mjs "$name" "$version" PracticalWorks/guardrails
