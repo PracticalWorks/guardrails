@@ -1,0 +1,68 @@
+#!/bin/sh
+# Every commit references an issue tracker ticket.
+#
+# Runs for people and for automated agents alike — the one chokepoint both
+# cross — so the rule cannot be quietly skipped by either.
+#
+# Accepts a reference in the subject inside brackets — one as [ABC-123], or
+# several as [ABC-123, ABC-124] / [ABC-1/2/3] — or as a trailer line:
+# "Refs: ABC-123" / "Ticket: ABC-123" / "Closes: ABC-123". The prefix is any
+# project key.
+#
+# KNOWN LIMITATION, deliberate: this is a client-side hook, so it cannot see a
+# forge-side squash-merge, whose subject is composed by the server from the pull
+# request title. Squashed commits therefore bypass it. The grammar below at least
+# matches the style those merges DO use, rather than being a rule the default
+# branch visibly violates. Catching the merge path needs either branch protection
+# or an after-the-fact audit; a client hook cannot do it.
+set -eu
+
+msg_file="$1"
+# Strip comment lines git adds to the editor buffer.
+msg="$(grep -v '^#' "$msg_file" || true)"
+
+# Merges, reverts, fixup/squash carry their parent's reference — let them pass.
+case "$msg" in
+  "Merge "*|"Revert "*|"fixup! "*|"squash! "*) exit 0 ;;
+esac
+
+ticket='[A-Z][A-Z0-9]{1,6}-[0-9]+'
+
+# A bracketed group carrying AT LEAST ONE ref, rather than a bracket that closes
+# immediately after one. The stricter form (`\[$ticket\]`) rejects the multi-ref
+# style that squash-merges produce — `[ABC-123, ABC-124]`, `[ABC-1/2/3]` — which
+# lands on the default branch regardless. `[^]]` is a literal `]` inside a POSIX
+# bracket expression, so the group cannot run past its own closing bracket.
+ok=0
+if printf '%s' "$msg" | grep -Eq "\[[^]]*$ticket[^]]*\]"; then
+  ok=1
+elif printf '%s' "$msg" | grep -Eiq "^(Refs?|Ticket|Closes|Fixes):[[:space:]]*$ticket"; then
+  ok=1
+fi
+
+if [ "$ok" = "0" ]; then
+  cat >&2 <<'EOF'
+
+  ✗ Commit rejected — no ticket referenced.
+
+  Every unit of work references a ticket. Add one of:
+
+    • in the subject:   fix: cron runs in the wrong tz  [ABC-123]
+    • several at once:  feat: close the loop  [ABC-123, ABC-124]
+    • as a trailer:     Refs: ABC-123
+
+  No ticket yet? File one first, then commit.
+
+EOF
+  exit 1
+fi
+
+# Then the repo's OWN commit-msg check, if it has one.
+#
+# core.hooksPath is a single path, so a repo can host exactly one hooks
+# directory. Without this line, adopting the shared package would silently
+# delete whatever hooks the repo already had — which would make adoption a
+# downgrade for any repo that had bothered to write some.
+local_hook="$(git rev-parse --show-toplevel 2>/dev/null || echo .)/.guardrails/commit-msg"
+[ -x "$local_hook" ] && exec "$local_hook" "$@"
+exit 0

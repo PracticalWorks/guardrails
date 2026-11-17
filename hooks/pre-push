@@ -1,0 +1,20 @@
+#!/bin/sh
+# Shared pre-push: a dispatcher, on purpose.
+#
+# There is no universal pre-push check. What a repo should run before pushing is
+# its own build and its own tests, which means nothing in a repo with different
+# scripts.
+#
+# So why ship one at all? Because `core.hooksPath` is a single path. The moment a
+# repo points it at this package to get the commit-msg rule, git stops looking
+# anywhere else — and a repo that had a working pre-push would lose it, silently,
+# as the direct result of adopting a guardrail. This hands control back.
+#
+# Put the repo's own checks in `.guardrails/pre-push`, executable. stdin matters:
+# git feeds pre-push the refs being pushed on stdin, so it is passed through
+# rather than consumed here.
+set -eu
+
+local_hook="$(git rev-parse --show-toplevel 2>/dev/null || echo .)/.guardrails/pre-push"
+[ -x "$local_hook" ] && exec "$local_hook" "$@"
+exit 0

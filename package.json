@@ -1,0 +1,53 @@
+{
+  "name": "@practicalworks/guardrails",
+  "version": "0.5.1",
+  "description": "Shared git hooks and a Claude Code secret guard, installed by one dev dependency: a ticket ref on every commit, your own hooks kept, and an AI agent that can't print your secrets.",
+  "keywords": [
+    "git-hooks",
+    "githooks",
+    "commit-msg",
+    "pre-push",
+    "core.hooksPath",
+    "husky-alternative",
+    "claude-code",
+    "ai-agent",
+    "secrets",
+    "guardrails"
+  ],
+  "homepage": "https://github.com/PracticalWorks/guardrails#readme",
+  "bugs": {
+    "url": "https://github.com/PracticalWorks/guardrails/issues"
+  },
+  "license": "MIT",
+  "author": "Practical Works <hello@practical.works> (https://practical.works)",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/PracticalWorks/guardrails.git"
+  },
+  "type": "module",
+  "bin": {
+    "factory-guardrails": "bin/factory-guardrails.mjs"
+  },
+  "files": [
+    "bin",
+    "hooks",
+    "agent-hooks"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "node -e \"process.exit(0)\"",
+    "test": "vitest run install.test.mjs",
+    "guard": "node --test scripts/guard.test.mjs scripts/verify-npm-provenance.test.mjs && node scripts/guard.mjs",
+    "guard:history": "node scripts/guard.mjs --history"
+  },
+  "publishConfig": {
+    "registry": "https://registry.npmjs.org/",
+    "access": "public"
+  },
+  "devDependencies": {
+    "vitest": "^3.0.0"
+  },
+  "packageManager": "pnpm@10.14.0"
+}
