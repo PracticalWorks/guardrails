@@ -63,9 +63,10 @@ jobs:
           fi
           npm publish "$RUNNER_TEMP"/pack/*.tgz --userconfig "$cfg" --registry https://npm.pkg.github.com
       # Last, so a slow or failed check never skips the GitHub Packages copy above.
-      # It waits up to 15 minutes for npm to serve a fresh version's attestation.
+      # It waits up to 15 minutes for npm to serve a fresh version's attestation, and
+      # passes only provenance built by THIS repo's publish.yml on refs/heads/main.
       - name: Verify npm provenance
         run: |
           name=$(node -p "require('./package.json').name")
           version=$(node -p "require('./package.json').version")
-          node scripts/verify-npm-provenance.mjs "$name" "$version"
+          node scripts/verify-npm-provenance.mjs "$name" "$version" PracticalWorks/guardrails
