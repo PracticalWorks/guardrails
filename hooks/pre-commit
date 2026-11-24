@@ -1,0 +1,17 @@
+#!/bin/sh
+# Refuses a commit that stages a secret or build output (the rule is in
+# lib/path-guard.sh, shared with pre-push), then runs the repo's own
+# .guardrails/pre-commit, the way commit-msg delegates.
+set -eu
+
+. "$(dirname "$0")/lib/path-guard.sh"
+
+# Deletions are left out: untracking a secret is the fix, not the offence.
+if ! git -c core.quotePath=false diff --cached --name-only --diff-filter=d | path_guard_check "Commit" \
+  "Unstage them (git rm -r --cached <path>)" "git commit ..."; then
+  exit 1
+fi
+
+local_hook="$(git rev-parse --show-toplevel 2>/dev/null || echo .)/.guardrails/pre-commit"
+[ -x "$local_hook" ] && exec "$local_hook" "$@"
+exit 0

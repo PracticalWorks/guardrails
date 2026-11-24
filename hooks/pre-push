@@ -1,20 +1,42 @@
 #!/bin/sh
-# Shared pre-push: a dispatcher, on purpose.
+# Shared pre-push: one shared rule, then a dispatcher.
 #
-# There is no universal pre-push check. What a repo should run before pushing is
-# its own build and its own tests, which means nothing in a repo with different
-# scripts.
+# The shared rule is the path guard from pre-commit, run again on every commit
+# about to leave the machine (lib/path-guard.sh says why it runs twice).
 #
-# So why ship one at all? Because `core.hooksPath` is a single path. The moment a
-# repo points it at this package to get the commit-msg rule, git stops looking
-# anywhere else — and a repo that had a working pre-push would lose it, silently,
-# as the direct result of adopting a guardrail. This hands control back.
-#
-# Put the repo's own checks in `.guardrails/pre-push`, executable. stdin matters:
-# git feeds pre-push the refs being pushed on stdin, so it is passed through
-# rather than consumed here.
+# Beyond that there is no universal pre-push check. What a repo should run
+# before pushing is its own build and its own tests, which means nothing in a
+# repo with different scripts. But `core.hooksPath` is a single path: the moment
+# a repo points it at this package, git stops looking anywhere else, and a repo
+# that had a working pre-push would lose it, silently. So control goes back to
+# the repo's own `.guardrails/pre-push`, if it is executable.
 set -eu
 
+. "$(dirname "$0")/lib/path-guard.sh"
+
+# git feeds pre-push one line per ref being pushed:
+#   <local ref> <local sha> <remote ref> <remote sha>
+# The guard reads them, so they are kept and handed on to the repo's hook unchanged.
+refs=$(cat)
+
+# Paths added or changed by every commit the remote does not have yet. Per commit,
+# not the net diff: a secret added and then deleted still leaves in history.
+outgoing() {
+  printf '%s\n' "$refs" | while read -r _ local_sha _ remote_sha; do
+    # An all-zero local sha is a branch deletion, which sends no commits.
+    case $local_sha in *[!0]*) ;; *) continue ;; esac
+    known=""
+    case $remote_sha in *[!0]*) git cat-file -e "$remote_sha^{commit}" 2>/dev/null && known=$remote_sha ;; esac
+    # shellcheck disable=SC2086 # $known is empty or one sha
+    git -c core.quotePath=false log --format= --name-only --diff-filter=d "$local_sha" --not --remotes $known
+  done
+}
+
+if ! outgoing | path_guard_check "Push" \
+  "Take them out of the unpushed commits (git rm -r --cached <path>, then amend or rebase)" "git push ..."; then
+  exit 1
+fi
+
 local_hook="$(git rev-parse --show-toplevel 2>/dev/null || echo .)/.guardrails/pre-push"
-[ -x "$local_hook" ] && exec "$local_hook" "$@"
-exit 0
+[ -x "$local_hook" ] || exit 0
+if [ -n "$refs" ]; then printf '%s\n' "$refs"; fi | exec "$local_hook" "$@"

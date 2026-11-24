@@ -1,11 +1,12 @@
 {
   "name": "@practicalworks/guardrails",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "description": "Shared git hooks and a Claude Code secret guard, installed by one dev dependency: a ticket ref on every commit, your own hooks kept, and an AI agent that can't print your secrets.",
   "keywords": [
     "git-hooks",
     "githooks",
     "commit-msg",
+    "pre-commit",
     "pre-push",
     "core.hooksPath",
     "husky-alternative",
