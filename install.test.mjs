@@ -198,6 +198,148 @@ describe("the shared hooks hand control back to the repo", () => {
   });
 });
 
+describe("the path guard: secrets and build output never staged or pushed", () => {
+  const ZERO = "0000000000000000000000000000000000000000";
+  const ALLOW = "GUARDRAILS_ALLOW_PATHS=1";
+  const who = { GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@example.com", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@example.com" };
+  const g = (dir, ...args) => execFileSync("git", args, { cwd: dir, env: { ...gitEnv(), ...who }, encoding: "utf8" }).trim();
+
+  /** Run a shipped hook in `dir` with `input` on stdin: { status, stderr }. */
+  function hook(dir, name, { input = "", env = {} } = {}) {
+    const run = spawnSync("/bin/sh", [join(HOOKS_DIR, name)], { cwd: dir, env: { ...gitEnv(), ...env }, input, encoding: "utf8" });
+    return { status: run.status, stderr: run.stderr };
+  }
+
+  /** Create each path (a file, its parent directories made) and force-stage it past any .gitignore. */
+  function stage(dir, ...paths) {
+    for (const p of paths) {
+      mkdirSync(join(dir, p, ".."), { recursive: true });
+      writeFileSync(join(dir, p), `stub-value for ${p}\n`);
+    }
+    g(dir, "add", "-f", "--", ...paths);
+  }
+
+  const SECRETS = [
+    ".env", ".env.development", "app/.env", "app/.env.production", "my-serviceAccount.json", "gcp-service-account.json",
+    "firebase-adminsdk-x1.json", "certs/server.pem", "id_rsa", "id_rsa.pub", "deploy/id_rsa", "aws/credentials.json", "tls/server.key",
+  ];
+  const BULK = [".next/x.js", ".next-old/x.js", "node_modules/x/index.js", "dist/x.js", "build/x.js", "coverage/lcov.info", ".turbo/x"];
+  // Logs are refused at any depth, like secrets, and each is named by its full path.
+  const LOGS = ["npm-debug.log", "logs/app.log", "apps/web/logs/dev.log"];
+
+  it.each([...SECRETS, ...BULK, ...LOGS])("pre-commit refuses a staged %s, naming it and the override", (path) => {
+    const dir = tempRepo();
+    stage(dir, path);
+    const run = hook(dir, "pre-commit");
+    expect(run.status).toBe(1);
+    expect(run.stderr).toContain(path.includes("/") && BULK.includes(path) ? `${path.split("/")[0]}/` : path);
+    expect(run.stderr).toContain(ALLOW);
+  });
+
+  it("pre-commit lets templates and look-alike source through", () => {
+    const dir = tempRepo();
+    stage(dir, ".env.example", "app/.env.sample", ".env.template", "README.md", "src/dist.ts", "src/build/index.ts", "docs/keys.md", "src/log.ts", "logs/app.log.example");
+    expect(hook(dir, "pre-commit")).toEqual({ status: 0, stderr: "" });
+  });
+
+  it("pre-commit lets the override through, and lets a secret be untracked", () => {
+    const dir = tempRepo();
+    stage(dir, ".env");
+    expect(hook(dir, "pre-commit", { env: { GUARDRAILS_ALLOW_PATHS: "1" } }).status).toBe(0);
+    g(dir, "commit", "-qm", "seed", "--no-verify");
+    g(dir, "rm", "-q", "--cached", ".env");
+    expect(hook(dir, "pre-commit").status).toBe(0);
+  });
+
+  it("pre-commit refuses BEFORE delegating, then hands a clean commit to .guardrails/pre-commit", () => {
+    const dir = tempRepo();
+    mkdirSync(join(dir, ".guardrails"));
+    writeFileSync(join(dir, ".guardrails", "pre-commit"), `#!/bin/sh\ntouch "${join(dir, "pre-commit.ran")}"\nexit 4\n`);
+    chmodSync(join(dir, ".guardrails", "pre-commit"), 0o755);
+    stage(dir, ".env");
+    expect(hook(dir, "pre-commit").status).toBe(1);
+    expect(existsSync(join(dir, "pre-commit.ran"))).toBe(false);
+    g(dir, "rm", "-q", "--cached", ".env");
+    stage(dir, "src/app.js");
+    expect(hook(dir, "pre-commit").status).toBe(4);
+    expect(existsSync(join(dir, "pre-commit.ran"))).toBe(true);
+  });
+
+  /** A repo with one commit pushed to a bare remote: { dir, base }. */
+  function pushedRepo() {
+    const dir = tempRepo();
+    const remote = mkdtempSync(join(tmpdir(), "guardrails-remote-"));
+    made.push(remote);
+    g(remote, "init", "-q", "--bare");
+    stage(dir, "README.md");
+    g(dir, "commit", "-qm", "seed", "--no-verify");
+    g(dir, "remote", "add", "origin", remote);
+    g(dir, "push", "-q", "origin", "HEAD:refs/heads/main");
+    return { dir, base: g(dir, "rev-parse", "HEAD") };
+  }
+
+  /** Commit `paths` past every hook, as a hand commit or an inherited branch would. */
+  function commitPast(dir, ...paths) {
+    stage(dir, ...paths);
+    g(dir, "commit", "-qm", "work", "--no-verify");
+    return g(dir, "rev-parse", "HEAD");
+  }
+
+  it("pre-push refuses an outgoing commit that carries a secret, naming it and the override", () => {
+    const { dir, base } = pushedRepo();
+    const head = commitPast(dir, ".env");
+    const run = hook(dir, "pre-push", { input: `refs/heads/main ${head} refs/heads/main ${base}\n` });
+    expect(run.status).toBe(1);
+    expect(run.stderr).toContain(".env");
+    expect(run.stderr).toContain(ALLOW);
+    expect(hook(dir, "pre-push", { input: `refs/heads/main ${head} refs/heads/main ${base}\n`, env: { GUARDRAILS_ALLOW_PATHS: "1" } }).status).toBe(0);
+  });
+
+  it("pre-push refuses an outgoing commit that carries a nested log", () => {
+    const { dir, base } = pushedRepo();
+    const head = commitPast(dir, "logs/app.log");
+    const run = hook(dir, "pre-push", { input: `refs/heads/main ${head} refs/heads/main ${base}\n` });
+    expect(run.status).toBe(1);
+    expect(run.stderr).toContain("logs/app.log");
+  });
+
+  it("pre-push checks every outgoing commit, so a secret added then deleted still refuses", () => {
+    const { dir } = pushedRepo();
+    commitPast(dir, "dist/x.js");
+    g(dir, "rm", "-rq", "dist");
+    g(dir, "commit", "-qm", "drop", "--no-verify");
+    const head = g(dir, "rev-parse", "HEAD");
+    // A new branch: git sends the zero sha as the remote's.
+    const run = hook(dir, "pre-push", { input: `refs/heads/topic ${head} refs/heads/topic ${ZERO}\n` });
+    expect(run.status).toBe(1);
+    expect(run.stderr).toContain("dist/");
+  });
+
+  it("pre-push ignores what the remote already has, an untracking commit and a branch deletion", () => {
+    const { dir } = pushedRepo();
+    const old = commitPast(dir, ".env.development");
+    g(dir, "push", "-q", "--no-verify", "origin", "HEAD:refs/heads/main");
+    g(dir, "rm", "-q", "--cached", ".env.development");
+    const head = commitPast(dir, "src/app.js");
+    expect(hook(dir, "pre-push", { input: `refs/heads/main ${head} refs/heads/main ${old}\n` }).status).toBe(0);
+    // A new branch sends the zero sha, so what the remote has comes from the remote-tracking refs.
+    expect(hook(dir, "pre-push", { input: `refs/heads/topic ${head} refs/heads/topic ${ZERO}\n` }).status).toBe(0);
+    expect(hook(dir, "pre-push", { input: `(delete) ${ZERO} refs/heads/gone ${old}\n` })).toEqual({ status: 0, stderr: "" });
+  });
+
+  it("pre-push hands git's ref list to .guardrails/pre-push unchanged", () => {
+    const { dir, base } = pushedRepo();
+    const p = join(dir, ".guardrails", "pre-push");
+    mkdirSync(join(dir, ".guardrails"));
+    writeFileSync(p, `#!/bin/sh\ncat > "${join(dir, "seen")}"\nexit 5\n`);
+    chmodSync(p, 0o755);
+    const head = commitPast(dir, "src/app.js");
+    const refs = `refs/heads/main ${head} refs/heads/main ${base}\nrefs/tags/v1 ${head} refs/tags/v1 ${ZERO}\n`;
+    expect(hook(dir, "pre-push", { input: refs }).status).toBe(5);
+    expect(readFileSync(join(dir, "seen"), "utf8")).toBe(refs);
+  });
+});
+
 describe("the Claude seat half", () => {
   const LOCAL = '"$CLAUDE_PROJECT_DIR"/node_modules/.bin/factory-guardrails agent-hook';
   const GLOBAL = "factory-guardrails agent-hook";

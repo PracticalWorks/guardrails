@@ -9,10 +9,11 @@
 What you get:
 
 - **A ticket reference on every commit** (`[ABC-123]` or a `Refs:` trailer), any project key.
+- **No secret or build directory committed.** A staged `.env`, private key or credentials file, or a `dist/` or `node_modules/`, is refused at commit and again at push.
 - **Your own hooks kept.** Most shared-hooks setups silently replace a repo's existing hooks. This one hands control back to yours in `.guardrails/`.
 - **An AI agent that can't print your secrets.** A [Claude Code](https://docs.claude.com/en/docs/claude-code) `PreToolUse` hook blocks environment dumps and printing a dotenv or credentials file, while still letting the agent read and edit those files.
 
-No build step, no runtime dependencies, about 13 kB.
+No build step, no runtime dependencies, about 15 kB.
 
 ## Install
 
@@ -58,7 +59,17 @@ Any project key works (`[A-Z]{1,7}-\d+`). Merges, reverts and `fixup!`/`squash!`
 
 One limitation, stated plainly because it matters: this is a client-side hook, so it cannot see a **forge-side squash-merge**, whose subject is composed by the server from the pull request title. Those bypass it. If that matters to you, pair this with branch protection or an after-the-fact audit of your default branch — a client hook physically cannot cover that path, and any tool claiming otherwise is wrong.
 
-**`pre-push`** — a dispatcher. It runs your repo's own pre-push and does nothing else.
+**`pre-commit`** — refuses a commit that stages a secret or build output, naming each path:
+
+| Kind | Paths |
+|---|---|
+| secret | `.env`, `.env.*` (at any depth), `*serviceAccount*.json`, `*service-account*.json`, `*adminsdk*.json`, `*.pem`, `id_rsa*`, `*credentials.json`, `*.key` |
+| build output | a top-level `.next*`, `node_modules`, `dist`, `build`, `coverage` or `.turbo` |
+| log | `*.log` (at any depth) |
+
+Templates are allowed: `*.example`, `*.sample` and `*.template`, so `.env.example` commits. Build output is judged by the top-level directory only, so `src/build/` is still source; a log, like a secret, is refused at any depth. Deleting a tracked secret is always allowed, because that is the fix. To commit a listed path on purpose, override once with `GUARDRAILS_ALLOW_PATHS=1 git commit ...`.
+
+**`pre-push`** — the same check on every commit about to leave the machine, then your repo's own pre-push. Pushing is checked as well as committing because a secret committed with `--no-verify`, or inherited on a branch from another clone, reaches the remote through push. Each outgoing commit is checked, not the net diff, so a secret added and then deleted on the branch is still refused: it would still be in the remote's history. The override is `GUARDRAILS_ALLOW_PATHS=1 git push ...`.
 
 ## Keeping your own hooks
 
@@ -69,11 +80,12 @@ So every hook here hands control back. Put your own checks in `.guardrails/`:
 ```
 .guardrails/
 ├── commit-msg           runs after the shared ticket rule passes
-├── pre-push             runs on every push (make it executable)
+├── pre-commit           runs after the shared path check passes
+├── pre-push             runs after the shared path check passes, with git's ref list on stdin
 └── block-secret-print   runs after the shared secret-print guard allows
 ```
 
-`commit-msg` and `block-secret-print` enforce the shared rule first, then delegate — so you can add repo-specific rules without losing the shared one. `pre-push` has no shared rule at all: what a repo should run before pushing is its own build and its own tests, which means nothing in a repo with different scripts.
+Each hook enforces the shared rule first, then delegates, so you can add repo-specific rules without losing the shared one. Beyond the path check, `pre-push` has no shared rule: what a repo should run before pushing is its own build and its own tests, which means nothing in a repo with different scripts. Your `.guardrails/pre-push` gets the same ref list on stdin that git gave the shared hook.
 
 ## CLI
 
