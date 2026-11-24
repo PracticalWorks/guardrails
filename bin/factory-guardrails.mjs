@@ -212,6 +212,82 @@ function status() {
   process.exit(installed ? 0 : 1);
 }
 
+// REPO DEFAULTS — the one half that is not about a clone. Settings live on GitHub,
+// so this needs a token with admin rights, which a clone or a CI run does not
+// have: it is run once per repo by a person, never from `prepare`.
+//
+// delete_branch_on_merge: GitHub retargets a stacked pull request onto the next
+// base only when its base branch is DELETED on merge. With the setting off, the
+// child of a merged parent merges into a dead branch instead.
+const REPO_DEFAULTS = { delete_branch_on_merge: true };
+const ADMIN_NEEDED =
+  'needs admin rights on the repository (a fine-grained token needs "Administration: write"; a classic token needs the "repo" scope, held by an admin)';
+
+function fail(message) {
+  console.error(`guardrails: ${message}`);
+  process.exit(1);
+}
+
+/** owner/repo from the argument, else from the `origin` remote of cwd. */
+function targetRepo(arg) {
+  const source = arg ?? tryGit(["remote", "get-url", "origin"], process.cwd());
+  const m = source?.match(/^(?:.*[:/])?([^/:\s]+)\/([^/:\s]+?)(?:\.git)?\/?$/);
+  if (!m) fail("repo-defaults: pass owner/repo, or run it in a clone whose origin remote is on GitHub.");
+  return `${m[1]}/${m[2]}`;
+}
+
+/** GH_TOKEN / GITHUB_TOKEN as gh itself reads them, else the gh CLI's login. */
+function githubToken() {
+  const env = process.env.GH_TOKEN || process.env.GITHUB_TOKEN;
+  if (env) return env;
+  try {
+    return execFileSync("gh", ["auth", "token"], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim() || null;
+  } catch {
+    return null;
+  }
+}
+
+async function repoDefaults(arg) {
+  const repo = targetRepo(arg);
+  const token = githubToken();
+  if (!token) fail("repo-defaults: no GitHub token. Set GH_TOKEN or GITHUB_TOKEN, or run `gh auth login`.");
+  const url = `${process.env.GITHUB_API_URL || "https://api.github.com"}/repos/${repo}`;
+  const call = async (method, body) => {
+    const res = await fetch(url, {
+      method,
+      headers: {
+        accept: "application/vnd.github+json",
+        authorization: `Bearer ${token}`,
+        "user-agent": "factory-guardrails",
+        "x-github-api-version": "2022-11-28",
+        ...(body && { "content-type": "application/json" }),
+      },
+      body: body && JSON.stringify(body),
+    }).catch((err) => fail(`repo-defaults: cannot reach ${url}: ${err.message}`));
+    const json = await res.json().catch(() => ({}));
+    return { status: res.status, json };
+  };
+
+  const read = await call("GET");
+  if (read.status !== 200) fail(`repo-defaults: cannot read ${repo} (${read.status} ${read.json.message ?? ""}).`);
+  const wrong = [];
+  for (const [key, want] of Object.entries(REPO_DEFAULTS)) {
+    if (read.json[key] === want) console.log(`guardrails: ${repo}: ${key} already ${want}.`);
+    else wrong.push([key, want]);
+  }
+  if (!wrong.length) return;
+
+  const patch = Object.fromEntries(wrong);
+  const write = await call("PATCH", patch);
+  // Success is the value GitHub reads back, not the status code: a refusal
+  // carries no settings, and a 200 can leave a setting alone.
+  if (wrong.some(([key, want]) => write.json[key] !== want)) {
+    const said = write.json.message ? ` GitHub said: ${write.status} ${write.json.message}` : ` (HTTP ${write.status})`;
+    fail(`repo-defaults: could not set ${Object.keys(patch).join(", ")} on ${repo}: the token ${ADMIN_NEEDED}.${said}`);
+  }
+  for (const [key, want] of wrong) console.log(`guardrails: ${repo}: ${key} ${read.json[key] ?? "(unset)"} -> ${want}.`);
+}
+
 const HELP = `factory-guardrails — the shop's shared git hooks and agent guard
 
   install     point core.hooksPath at this package's hooks, and wire the
@@ -219,6 +295,10 @@ const HELP = `factory-guardrails — the shop's shared git hooks and agent guard
   uninstall   restore core.hooksPath; remove only the agent-hook entry
   status      report both halves (exit 1 if either is not wired)
   agent-hook  the Claude Code PreToolUse guard install wires (tool call on stdin)
+  repo-defaults [owner/repo]
+              turn on GitHub's "automatically delete head branches" for the
+              repo (default: the origin remote); needs an admin token, so run
+              it by hand once per repo, never from prepare
 
 Adopt in a repo by adding ONE line to package.json:
 
@@ -234,6 +314,7 @@ if (cmd === "install") install();
 else if (cmd === "uninstall") uninstall();
 else if (cmd === "status") status();
 else if (cmd === "agent-hook") agentHook();
+else if (cmd === "repo-defaults") await repoDefaults(process.argv[3]);
 else {
   console.log(HELP);
   process.exit(cmd === "--help" || cmd === "-h" ? 0 : 1);

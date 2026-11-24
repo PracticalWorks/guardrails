@@ -12,7 +12,7 @@ What you get:
 - **Your own hooks kept.** Most shared-hooks setups silently replace a repo's existing hooks. This one hands control back to yours in `.guardrails/`.
 - **An AI agent that can't print your secrets.** A [Claude Code](https://docs.claude.com/en/docs/claude-code) `PreToolUse` hook blocks environment dumps and printing a dotenv or credentials file, while still letting the agent read and edit those files.
 
-No build step, no runtime dependencies, about 11 kB.
+No build step, no runtime dependencies, about 13 kB.
 
 ## Install
 
@@ -31,6 +31,17 @@ Then one line in `package.json`:
 ```
 
 That's it. `prepare` runs on install, so everyone who installs the repo gets the hooks and the agent guard — including CI, and including automated contributors that install dependencies before they work. That last part is the reason this is a dependency rather than a file you copy: an agent working in your repo is bound by the same hook a human is, from the same version, with nothing extra to configure.
+
+Last, once per repo, set its GitHub defaults (this needs an admin token, so it is a step a person runs, not part of `prepare`):
+
+```sh
+npx factory-guardrails repo-defaults            # the repo of the origin remote
+npx factory-guardrails repo-defaults owner/repo # or name it
+```
+
+Today that is one setting: **automatically delete head branches** (`delete_branch_on_merge`). GitHub retargets a stacked pull request onto the next base only when its base branch is deleted on merge; with the setting off, the child of a merged parent merges into a dead branch. The command reads the repo first, writes only a setting that is off, and prints each one it changed or found already on, so a second run changes nothing.
+
+It authenticates the way `gh` does: `GH_TOKEN` or `GITHUB_TOKEN`, else your `gh auth login`. A token that cannot write repo settings makes it exit non-zero and name the permission it lacks: "Administration: write" on a fine-grained token, or the `repo` scope held by a repo admin on a classic one.
 
 ## What the hooks do
 
@@ -71,6 +82,7 @@ factory-guardrails install      # point core.hooksPath here + wire the agent hoo
 factory-guardrails uninstall    # restore core.hooksPath; remove only our agent-hook entry
 factory-guardrails status       # report both halves (exit 1 if either is not wired)
 factory-guardrails agent-hook   # the PreToolUse guard itself; install wires it, you never call it
+factory-guardrails repo-defaults [owner/repo]  # set the repo's GitHub defaults (admin token; idempotent)
 ```
 
 `install` saves your previous `core.hooksPath` once, so `uninstall` genuinely puts it back. If there was nothing before, `uninstall` unsets it rather than leaving a path pointing at a package that may no longer be installed — a dangling `core.hooksPath` disables every hook silently, which is worse than having none.
