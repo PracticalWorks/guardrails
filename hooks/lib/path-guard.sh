@@ -9,7 +9,7 @@
 #
 # Patterns use shell `case` matching, where `*` also matches `/`.
 
-# Sets $kind to the kind of forbidden path $1 is: "secret", "bulk", or empty.
+# Sets $kind to the kind of forbidden path $1 is: "secret", "bulk", "log", or empty.
 # A variable, not output, so a staged node_modules costs no subshell per path.
 path_guard_kind() {
   kind=""
@@ -24,7 +24,14 @@ path_guard_kind() {
   esac
   # Build output is judged by the top-level directory only, so src/build/ stays source.
   case ${1%%/*} in
-    .next* | node_modules | dist | build | coverage | .turbo | *.log) kind=bulk ;;
+    .next* | node_modules | dist | build | coverage | .turbo)
+      kind=bulk
+      return
+      ;;
+  esac
+  # A log is never source, so like a secret it is refused at any depth.
+  case $1 in
+    *.log) kind=log ;;
   esac
 }
 
@@ -45,6 +52,7 @@ path_guard_check() {
         # One line per build directory: node_modules alone can be thousands of paths.
         bulk/*/*) printf '    %-36s build output\n' "${p%%/*}/" ;;
         bulk/*) printf '    %-36s build output\n' "$p" ;;
+        log/*) printf '    %-36s log\n' "$p" ;;
       esac
     done | sort -u
   )

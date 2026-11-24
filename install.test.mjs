@@ -223,9 +223,11 @@ describe("the path guard: secrets and build output never staged or pushed", () =
     ".env", ".env.development", "app/.env", "app/.env.production", "my-serviceAccount.json", "gcp-service-account.json",
     "firebase-adminsdk-x1.json", "certs/server.pem", "id_rsa", "id_rsa.pub", "deploy/id_rsa", "aws/credentials.json", "tls/server.key",
   ];
-  const BULK = [".next/x.js", ".next-old/x.js", "node_modules/x/index.js", "dist/x.js", "build/x.js", "coverage/lcov.info", ".turbo/x", "npm-debug.log"];
+  const BULK = [".next/x.js", ".next-old/x.js", "node_modules/x/index.js", "dist/x.js", "build/x.js", "coverage/lcov.info", ".turbo/x"];
+  // Logs are refused at any depth, like secrets, and each is named by its full path.
+  const LOGS = ["npm-debug.log", "logs/app.log", "apps/web/logs/dev.log"];
 
-  it.each([...SECRETS, ...BULK])("pre-commit refuses a staged %s, naming it and the override", (path) => {
+  it.each([...SECRETS, ...BULK, ...LOGS])("pre-commit refuses a staged %s, naming it and the override", (path) => {
     const dir = tempRepo();
     stage(dir, path);
     const run = hook(dir, "pre-commit");
@@ -236,7 +238,7 @@ describe("the path guard: secrets and build output never staged or pushed", () =
 
   it("pre-commit lets templates and look-alike source through", () => {
     const dir = tempRepo();
-    stage(dir, ".env.example", "app/.env.sample", ".env.template", "README.md", "src/dist.ts", "src/build/index.ts", "docs/keys.md");
+    stage(dir, ".env.example", "app/.env.sample", ".env.template", "README.md", "src/dist.ts", "src/build/index.ts", "docs/keys.md", "src/log.ts", "logs/app.log.example");
     expect(hook(dir, "pre-commit")).toEqual({ status: 0, stderr: "" });
   });
 
@@ -291,6 +293,14 @@ describe("the path guard: secrets and build output never staged or pushed", () =
     expect(run.stderr).toContain(".env");
     expect(run.stderr).toContain(ALLOW);
     expect(hook(dir, "pre-push", { input: `refs/heads/main ${head} refs/heads/main ${base}\n`, env: { GUARDRAILS_ALLOW_PATHS: "1" } }).status).toBe(0);
+  });
+
+  it("pre-push refuses an outgoing commit that carries a nested log", () => {
+    const { dir, base } = pushedRepo();
+    const head = commitPast(dir, "logs/app.log");
+    const run = hook(dir, "pre-push", { input: `refs/heads/main ${head} refs/heads/main ${base}\n` });
+    expect(run.status).toBe(1);
+    expect(run.stderr).toContain("logs/app.log");
   });
 
   it("pre-push checks every outgoing commit, so a secret added then deleted still refuses", () => {

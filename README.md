@@ -64,9 +64,10 @@ One limitation, stated plainly because it matters: this is a client-side hook, s
 | Kind | Paths |
 |---|---|
 | secret | `.env`, `.env.*` (at any depth), `*serviceAccount*.json`, `*service-account*.json`, `*adminsdk*.json`, `*.pem`, `id_rsa*`, `*credentials.json`, `*.key` |
-| build output | a top-level `.next*`, `node_modules`, `dist`, `build`, `coverage`, `.turbo` or `*.log` |
+| build output | a top-level `.next*`, `node_modules`, `dist`, `build`, `coverage` or `.turbo` |
+| log | `*.log` (at any depth) |
 
-Templates are allowed: `*.example`, `*.sample` and `*.template`, so `.env.example` commits. Build output is judged by the top-level directory only, so `src/build/` is still source. Deleting a tracked secret is always allowed, because that is the fix. To commit a listed path on purpose, override once with `GUARDRAILS_ALLOW_PATHS=1 git commit ...`.
+Templates are allowed: `*.example`, `*.sample` and `*.template`, so `.env.example` commits. Build output is judged by the top-level directory only, so `src/build/` is still source; a log, like a secret, is refused at any depth. Deleting a tracked secret is always allowed, because that is the fix. To commit a listed path on purpose, override once with `GUARDRAILS_ALLOW_PATHS=1 git commit ...`.
 
 **`pre-push`** — the same check on every commit about to leave the machine, then your repo's own pre-push. Pushing is checked as well as committing because a secret committed with `--no-verify`, or inherited on a branch from another clone, reaches the remote through push. Each outgoing commit is checked, not the net diff, so a secret added and then deleted on the branch is still refused: it would still be in the remote's history. The override is `GUARDRAILS_ALLOW_PATHS=1 git push ...`.
 
