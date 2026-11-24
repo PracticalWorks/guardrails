@@ -4,7 +4,7 @@
 // git's own config — idempotency, what "previous value" means on a second run,
 // and whether uninstall genuinely puts back what was there. All of that is only
 // true or false against a real `git config`.
-import { execFileSync, spawnSync } from "node:child_process";
+import { execFileSync, spawn, spawnSync } from "node:child_process";
 import {
   chmodSync,
   existsSync,
@@ -16,6 +16,7 @@ import {
   symlinkSync,
   writeFileSync,
 } from "node:fs";
+import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -373,5 +374,130 @@ describe("factory-guardrails agent-hook", () => {
 
   it("fails OPEN when bash cannot be started", () => {
     expect(guard(tempRepo(), "cat .env", { PATH: pathWithout("bash") }).status).toBe(0);
+  });
+});
+
+describe("factory-guardrails repo-defaults", () => {
+  /**
+   * A stand-in for the GitHub REST API on localhost. The CLI is pointed at it
+   * through GITHUB_API_URL, so no test ever reaches GitHub. `repo` is what a
+   * GET returns; `patch` answers a PATCH, by default by applying it.
+   */
+  async function stubGitHub({ repo, get = 200, patch }) {
+    const seen = [];
+    const server = createServer((req, res) => {
+      let body = "";
+      req.on("data", (c) => (body += c));
+      req.on("end", () => {
+        const parsed = body ? JSON.parse(body) : null;
+        seen.push({ method: req.method, url: req.url, auth: req.headers.authorization, body: parsed });
+        const [status, json] =
+          req.method === "PATCH" ? (patch ?? (() => [200, { ...repo, ...parsed }]))(parsed) : [get, repo];
+        res.writeHead(status, { "content-type": "application/json" });
+        res.end(JSON.stringify(json));
+      });
+    });
+    await new Promise((ok) => server.listen(0, "127.0.0.1", ok));
+    return { url: `http://127.0.0.1:${server.address().port}`, seen, close: () => server.close() };
+  }
+
+  /** Run the CLI WITHOUT blocking, so the in-process stub can answer it. */
+  function run(dir, api, argv = [], env = {}) {
+    return new Promise((resolve) => {
+      const child = spawn(process.execPath, [CLI, "repo-defaults", ...argv], {
+        cwd: dir,
+        env: { ...gitEnv(), GITHUB_API_URL: api.url, GH_TOKEN: "stub-token", GITHUB_TOKEN: "", ...env },
+      });
+      let stdout = "";
+      let stderr = "";
+      child.stdout.on("data", (c) => (stdout += c));
+      child.stderr.on("data", (c) => (stderr += c));
+      child.on("close", (status) => resolve({ status, stdout, stderr }));
+    });
+  }
+
+  const admin = { admin: true, maintain: true, push: true, triage: true, pull: true };
+
+  it("changes nothing when the setting is already on", async () => {
+    const api = await stubGitHub({ repo: { full_name: "abc-org/example", delete_branch_on_merge: true, permissions: admin } });
+    try {
+      const out = await run(tempRepo(), api, ["abc-org/example"]);
+      expect(out.status).toBe(0);
+      expect(out.stdout).toMatch(/delete_branch_on_merge already true/);
+      expect(api.seen.map((r) => r.method)).toEqual(["GET"]);
+    } finally {
+      api.close();
+    }
+  });
+
+  it("turns the setting on with one PATCH, learning the repo from the origin remote", async () => {
+    const api = await stubGitHub({ repo: { full_name: "abc-org/example", delete_branch_on_merge: false, permissions: admin } });
+    const dir = tempRepo();
+    execFileSync("git", ["remote", "add", "origin", "git@github.com:abc-org/example.git"], { cwd: dir, env: gitEnv() });
+    try {
+      const out = await run(dir, api);
+      expect(out.status).toBe(0);
+      expect(out.stdout).toMatch(/abc-org\/example: delete_branch_on_merge false -> true/);
+      const patches = api.seen.filter((r) => r.method === "PATCH");
+      expect(patches).toEqual([
+        { method: "PATCH", url: "/repos/abc-org/example", auth: "Bearer stub-token", body: { delete_branch_on_merge: true } },
+      ]);
+    } finally {
+      api.close();
+    }
+  });
+
+  it("exits non-zero naming the missing permission when the token cannot write settings", async () => {
+    const api = await stubGitHub({
+      repo: { full_name: "abc-org/example", permissions: { ...admin, admin: false } },
+      patch: () => [403, { message: "Must have admin rights to Repository." }],
+    });
+    try {
+      const out = await run(tempRepo(), api, ["abc-org/example"]);
+      expect(out.status).not.toBe(0);
+      expect(out.stderr).toMatch(/admin/i);
+      expect(out.stderr).toMatch(/Administration: write/);
+      expect(out.stderr).toMatch(/Must have admin rights to Repository/);
+    } finally {
+      api.close();
+    }
+  });
+
+  it("names what is missing before it writes: the repo, the token, or read access", async () => {
+    const api = await stubGitHub({ get: 404, repo: { message: "Not Found" } });
+    try {
+      // No argument and no origin remote: nothing to act on.
+      const noRepo = await run(tempRepo(), api);
+      expect(noRepo.status).not.toBe(0);
+      expect(noRepo.stderr).toMatch(/pass owner\/repo/);
+
+      // No token in the environment and no gh on PATH.
+      const empty = mkdtempSync(join(tmpdir(), "guardrails-nogh-"));
+      made.push(empty);
+      const noToken = await run(tempRepo(), api, ["abc-org/example"], { GH_TOKEN: "", PATH: empty });
+      expect(noToken.status).not.toBe(0);
+      expect(noToken.stderr).toMatch(/no GitHub token/);
+
+      const unreadable = await run(tempRepo(), api, ["abc-org/example"]);
+      expect(unreadable.status).not.toBe(0);
+      expect(unreadable.stderr).toMatch(/cannot read abc-org\/example \(404 Not Found\)/);
+      expect(api.seen.map((r) => r.method)).toEqual(["GET"]);
+    } finally {
+      api.close();
+    }
+  });
+
+  it("fails, rather than claiming success, when GitHub accepts the PATCH but ignores the setting", async () => {
+    const api = await stubGitHub({
+      repo: { full_name: "abc-org/example", delete_branch_on_merge: false, permissions: admin },
+      patch: () => [200, { full_name: "abc-org/example", delete_branch_on_merge: false }],
+    });
+    try {
+      const out = await run(tempRepo(), api, ["abc-org/example"]);
+      expect(out.status).not.toBe(0);
+      expect(out.stderr).toMatch(/Administration: write/);
+    } finally {
+      api.close();
+    }
   });
 });
